@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -6,7 +7,7 @@ using System.Text;
 using UnityEngine;
 
 namespace Assets {
-	public class WorkshopBundleLoader {
+	class WorkshopBundleLoader {
 		string _directory;
 
 		public static void Load( string directory ) {
@@ -22,8 +23,9 @@ namespace Assets {
 			} );
 		}
 
-		private void ReadWholeFile( string filePath, Action<Exception, byte[]> callback ) {
+		public static void ReadWholeFile( string filePath, Action<Exception, byte[]> callback ) {
 			FileStream stream;
+			Debug.Log("here1");
 
 			try {
 				stream = new FileStream( filePath, FileMode.Open, FileAccess.Read, FileShare.Read );
@@ -35,8 +37,11 @@ namespace Assets {
 
 			MemoryStream memoryStream = new MemoryStream( (int) stream.Length );
 
-			Action read = () => {
+			Action read = () => { };
+
+			read = () => {
 				byte[] buffer = new byte[4096];
+				//Debug.Log("here");
 
 				stream.BeginRead( buffer, 0, buffer.Length, asyncResult => {
 					int readCount;
@@ -48,9 +53,11 @@ namespace Assets {
 						callback( ex, null );
 						return;
 					}
+					//Debug.Log(readCount);
 
 					if( readCount != 0 ) {
 						memoryStream.Write( buffer, 0, readCount );
+						read();
 					}
 					else {
 						stream.Dispose();
@@ -90,8 +97,77 @@ namespace Assets {
 
 	public class WorkshopBundle {
 		ulong _publishedFileId;
-		List<WorkshopItem> _items;
+		List<WorkshopItem> _items = new List<WorkshopItem>();
+		const string __models = "Models", __textures = "Textures";
 
+		public WorkshopTexture GetTexture( string name ) {
+			return _items.OfType<WorkshopTexture>().FirstOrDefault( t => t.Name == name );
+		}
+
+		public WorkshopModel GetModel( string name ) {
+			return _items.OfType<WorkshopModel>().FirstOrDefault( t => t.Name == name );
+		}
+
+		public List<WorkshopItem> Items
+			{ get { return _items; } }
+
+		public IEnumerator LoadDirectory( string directory ) {
+			directory = Path.GetFullPath( directory );
+
+			// Collect the lists of models and textures currently in the directory
+			string modelsPath = Path.Combine( directory, __models );
+			HashSet<string> modelPaths;
+
+			if( Directory.Exists( modelsPath ) ) {
+				modelPaths = new HashSet<string>( Directory.GetFiles( modelsPath ).Select( p => Path.Combine( __models, Path.GetFileName( p ) ) ) );
+			}
+			else {
+				modelPaths = new HashSet<string>();
+			}
+
+			string texturesPath = Path.Combine( directory, __textures );
+			HashSet<string> texturePaths;
+
+			if( Directory.Exists( texturesPath ) ) {
+				texturePaths = new HashSet<string>( Directory.GetFiles( texturesPath ).Select( p => Path.Combine( __textures, Path.GetFileName( p ) ) ) );
+				foreach(string path in texturePaths)
+					Debug.Log(path);
+			}
+			else {
+				texturePaths = new HashSet<string>();
+			}
+
+			// Go through all of our existing models/textures, reload them, and remove them from the new lists
+			foreach( WorkshopLoadableItem item in _items ) {
+				yield return item.LoadFile( directory, item.SourceFileName );
+
+				if( item is WorkshopModel )
+					modelPaths.Remove( item.SourceFileName );
+				else if( item is WorkshopTexture )
+					texturePaths.Remove( item.SourceFileName );
+			}
+
+			// Whatever remains is new
+			foreach( string path in modelPaths ) {
+				Debug.Log(path);
+				WorkshopModel model = new WorkshopModel( Guid.NewGuid() );
+				model.Name = path;
+				foreach( object obj in model.LoadFile( directory, path ) )
+					yield return null;
+				Debug.Log( "after load");
+
+				_items.Add( model );
+			}
+
+			foreach( string path in texturePaths ) {
+				WorkshopTexture texture = new WorkshopTexture( Guid.NewGuid() );
+				texture.Name = path;
+				foreach( object obj in texture.LoadFile( directory, path ) )
+					yield return null;
+
+				_items.Add( texture );
+			}
+		}
 	}
 
 	public class WorkshopItem {
@@ -119,28 +195,59 @@ namespace Assets {
 	}
 
 	public class WorkshopDecorativeObject : WorkshopItem {
-		ObjectModel _model, _collisionModel;
-		//MaterialData _material;
+		public WorkshopModel DisplayModel, CollisionModel;
+		private MaterialData _material;
+
+		public WorkshopDecorativeObject( Guid guid ) : base( guid ) {
+			_material = new Assets.MaterialData();
+		}
+
+		public MaterialData Material
+			{ get { return _material; } }
 	}
 
 	/*public class WorkshopToken : WorkshopItem {
 
 	}*/
 
-	public class WorkshopTexture : WorkshopItem {
+	public class WorkshopTexture : WorkshopLoadableItem {
 		byte[] _textureFileData;
 		Texture2D _texture;
 
-		public WorkshopTexture( Guid guid, byte[] fileData ) : base( name ) {
-			if( fileData == null )
-				throw new ArgumentNullException( "fileData" );
+		public WorkshopTexture( Guid guid ) : base( guid ) {
+		}
 
-			_textureFileData = fileData;
+		protected override void LoadFileImpl( string fileName, Action<Exception> callback ) {
+			_textureFileData = null;
+
+			if( _texture != null ) {
+				UnityEngine.Object.Destroy( _texture );
+				_texture = null;
+			}
+
+			WorkshopBundleLoader.ReadWholeFile( fileName, (err, result) => {
+				if( err != null ) {
+					callback(err);
+					return;
+				}
+
+				_textureFileData = result;
+
+				try {
+					Texture2D mesh = Texture;
+				}
+				catch( Exception ex ) {
+					callback(ex);
+					return;
+				}
+
+				callback(null);
+			} );
 		}
 
 		public Texture2D Texture {
 			get {
-				if( _texture == null ) {
+				if( _texture == null && _textureFileData != null ) {
 					_texture = new Texture2D( 2, 2 );
 					_texture.LoadImage( _textureFileData, false );
 				}
@@ -150,28 +257,95 @@ namespace Assets {
 		}
 	}
 
-/*	public class WorkshopTile : WorkshopItem {
-		ObjectModel _model;
-		int _height, _width;
+	/*	public class WorkshopTile : WorkshopItem {
+			ObjectModel _model;
+			int _height, _width;
+		}
+
+		public class WorkshopTileSet : WorkshopItem {
+		}*/
+
+	public abstract class WorkshopLoadableItem : WorkshopItem {
+		Exception _loadError;
+		string _sourceFileName;
+		bool _fileMissing;
+
+		protected WorkshopLoadableItem( Guid guid ) : base( guid ) {
+		}
+
+		/// <summary>
+		/// Gets the load error, if there was one.
+		/// </summary>
+		public Exception LoadError {
+			get { return _loadError; }
+		}
+
+		/// <summary>
+		/// Gets the last recorded file name that this texture was loaded from.
+		/// </summary>
+		public string SourceFileName {
+			get { return _sourceFileName; }
+		}
+
+		public IEnumerable LoadFile( string basePath, string fileName ) {
+			_sourceFileName = fileName;
+			string fullPath = Path.GetFullPath( Path.Combine( basePath, fileName ) );
+			bool done = false;
+			Debug.Log("here2");
+
+			LoadFileImpl( fullPath, err => {
+				_loadError = err;
+				Debug.Log("callback hit");
+				done = true;
+			} );
+
+			while( !done )
+				yield return null;
+		}
+
+		protected abstract void LoadFileImpl( string fileName, Action<Exception> callback );
 	}
 
-	public class WorkshopTileSet : WorkshopItem {
-	}*/
-
-	public class ObjectModel {
+	public class WorkshopModel : WorkshopLoadableItem {
 		string _objText;
 		Mesh _mesh;
 
-		public ObjectModel( string objText ) {
-			if( objText == null )
-				throw new ArgumentNullException( "objText" );
+		public WorkshopModel( Guid guid ) : base( guid ) {
+		}
 
-			_objText = objText;
+		protected override void LoadFileImpl( string fileName, Action<Exception> callback ) {
+			_objText = null;
+
+			if( _mesh != null ) {
+				UnityEngine.Object.Destroy( _mesh );
+				_mesh = null;
+			}
+
+			WorkshopBundleLoader.ReadWholeFile( fileName, (err, result) => {
+				Debug.Log( err );
+				Debug.Log( result );
+				if( err != null ) {
+					callback(err);
+					return;
+				}
+
+				_objText = (result != null) ? Encoding.ASCII.GetString( result ) : null;
+
+				try {
+					Mesh mesh = Mesh;
+				}
+				catch( Exception ex ) {
+					callback(ex);
+					return;
+				}
+
+				callback(null);
+			} );
 		}
 
 		public Mesh Mesh {
 			get {
-				if( _mesh == null ) {
+				if( _mesh == null && _objText != null ) {
 					_mesh = ObjImporter.ImportFile( _objText );
 				}
 
@@ -180,37 +354,40 @@ namespace Assets {
 		}
 	}
 
-/*	public class MaterialData {
-		//Shader ID.  Index to a fixed list of shaders.
-		public int shaderID;
+	public struct NVector4 {
+		public float X, Y, Z, W;
+	}
 
+	public class MaterialData {
 		//Diffuse
-		public SVector4 diffuseColor;
-		public string diffuseTexture;
+		public NVector4 diffuseColor;
+		public WorkshopTexture diffuseTexture;
 
 		//Specularity
-		public SVector4 specularColor;
-		public string specularTexture;
+		public NVector4 specularColor;
+		public WorkshopTexture specularTexture;
 		public float specularHardness;
 
 		//Emmissive
-		public SVector4 emissiveColor;
-		public string emmisiveTexture;
+		public NVector4 emissiveColor;
+		public WorkshopTexture emissiveTexture;
 
 		//Normal
-		public string normalTexture;
+		public WorkshopTexture normalTexture;
 
 		//Ambient Occlusion
-		public string AOTexture;
+		public WorkshopTexture ambientOcclusionTexture;
 
-		//Creates and returns a new MaterialData from an existing Material
-		public static MaterialData CreateMaterialData( Material material ) {
-			MaterialData md = new MaterialData();
-
-			//TODO: Create shader reference list.
-			md.shaderID = 0;
-
-			md.diffuseColor = material.color;
+		public void UpdateMaterial( Material material ) {
+			material.SetColor( "_Color", new Color( diffuseColor.X, diffuseColor.Y, diffuseColor.Z, diffuseColor.W ) );
+			material.SetTexture( "_MainTex", (diffuseTexture != null) ? diffuseTexture.Texture : null );
+			material.SetColor( "_SpecColor", new Color( emissiveColor.X, emissiveColor.Y, emissiveColor.Z, emissiveColor.W ) );
+			material.SetTexture( "_SpecGlossMap", (specularTexture != null) ? specularTexture.Texture : null );
+			material.SetFloat( "_SpecularHighlights", specularHardness );
+			material.SetColor( "_EmissionColor", new Color( emissiveColor.X, emissiveColor.Y, emissiveColor.Z, emissiveColor.W ) );
+			material.SetTexture( "_EmissionMap", (emissiveTexture != null) ? emissiveTexture.Texture : null );
+			material.SetTexture( "_BumpMap", (normalTexture != null) ? normalTexture.Texture : null );
+			material.SetTexture( "_OcclusionMap", (ambientOcclusionTexture != null) ? ambientOcclusionTexture.Texture : null );
 		}
-	}*/
+	}
 }
